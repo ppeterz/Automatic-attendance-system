@@ -1,0 +1,447 @@
+// Enter your Spreadsheet ID here
+var SS = SpreadsheetApp.openById('1TeXPGRw0rGh5TTomuO8Bqe2tkz0d3hVOOjR3uxc0KI8');
+var str = "";
+
+function doPost(e) {
+  var parsedData;
+  var result = {};
+  
+  try { 
+    parsedData = JSON.parse(e.postData.contents);
+  } 
+  catch(f){
+    return ContentService.createTextOutput("Error in parsing request body: " + f.message);
+  }
+   
+  if (parsedData !== undefined){
+    var flag = parsedData.format;
+    if (flag === undefined){
+      flag = 0;
+    }
+    
+    // Get current date and time in Africa/Lagos timezone
+    var date_now = Utilities.formatDate(new Date(), "Africa/Lagos", "yyyy-MM-dd");
+    var time_now = Utilities.formatDate(new Date(), "Africa/Lagos", "HH:mm:ss");
+    
+    // Execute command based on the request
+    switch (parsedData.command) {
+      
+      case "create_sheet":
+        str = createNewSheet(parsedData.sheet_name);
+        break;
+        
+      case "insert_row":
+        str = insertAttendanceRow(parsedData, date_now, time_now);
+        break;
+        
+      case "update_row":
+        str = updateSignOutTime(parsedData, time_now);
+        break;
+        
+      case "get_today_data":
+        str = getTodayAttendanceData(parsedData.sheet_name);
+        break;
+        
+      case "check_employee_status":
+        str = checkEmployeeStatus(parsedData);
+        break;
+        
+      case "append_row":
+        str = appendAttendanceRow(parsedData, date_now, time_now);
+        break;
+        
+      default:
+        str = "Error: Unknown command - " + parsedData.command;
+        break;
+    }
+    
+    return ContentService.createTextOutput(str);
+  } 
+  else {
+    return ContentService.createTextOutput("Error! Request body empty or in incorrect format.");
+  }
+}
+
+function createNewSheet(sheetName) {
+  try {
+    // Check if sheet already exists
+    var existingSheet = SS.getSheetByName(sheetName);
+    if (existingSheet) {
+      return "Sheet already exists: " + sheetName;
+    }
+    
+    // Create new sheet
+    var newSheet = SS.insertSheet(sheetName);
+    
+    // Add headers
+    var headers = ["Date", "Employee ID", "Surname", "First Name", "Sign-In Time", "Sign-Out Time", "Status"];
+    newSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    
+    // Format header row
+    var headerRange = newSheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight("bold");
+    headerRange.setBackground("#4CAF50");
+    headerRange.setFontColor("white");
+    
+    // Set column widths
+    newSheet.setColumnWidth(1, 100); // Date
+    newSheet.setColumnWidth(2, 120); // Employee ID
+    newSheet.setColumnWidth(3, 150); // Surname
+    newSheet.setColumnWidth(4, 150); // First Name
+    newSheet.setColumnWidth(5, 120); // Sign-In Time
+    newSheet.setColumnWidth(6, 120); // Sign-Out Time
+    newSheet.setColumnWidth(7, 100); // Status
+    
+    // Add conditional formatting for status
+    var statusRange = newSheet.getRange("G:G");
+    var rule1 = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("Present")
+      .setBackground("#C8E6C9")
+      .setRanges([statusRange])
+      .build();
+    var rule2 = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("Signed Out")
+      .setBackground("#FFCDD2")
+      .setRanges([statusRange])
+      .build();
+    var rules = newSheet.getConditionalFormatRules();
+    rules.push(rule1, rule2);
+    newSheet.setConditionalFormatRules(rules);
+    
+    SpreadsheetApp.flush();
+    return "Success: Created new sheet - " + sheetName;
+    
+  } catch (error) {
+    return "Error creating sheet: " + error.toString();
+  }
+}
+
+function insertAttendanceRow(parsedData, date_now, time_now) {
+  try {
+    var sheet = SS.getSheetByName(parsedData.sheet_name);
+    
+    // Create sheet if it doesn't exist
+    if (!sheet) {
+      createNewSheet(parsedData.sheet_name);
+      sheet = SS.getSheetByName(parsedData.sheet_name);
+    }
+    
+    // Parse the values string
+    var dataArr = parsedData.values.split(",");
+    
+    // Ensure we have enough data
+    if (dataArr.length < 5) {
+      return "Error: Insufficient data provided";
+    }
+    
+    // Extract data with fallbacks
+    var date = dataArr[0] || date_now;
+    var employeeId = dataArr[1] || "";
+    var surname = dataArr[2] || "";
+    var firstName = dataArr[3] || "";
+    var signInTime = dataArr[4] || time_now;
+    var signOutTime = dataArr[5] || "";
+    
+    // Validate required fields
+    if (!employeeId || !surname || !firstName) {
+      return "Error: Missing required employee data";
+    }
+    
+    // Check if employee already has a record today
+    var existingRowIndex = findEmployeeRow(sheet, employeeId);
+    
+    if (existingRowIndex > 0) {
+      return "Error: Employee " + employeeId + " already has a record for today";
+    }
+    
+    // Add new row
+    var nextRow = getNextAvailableRow(sheet);
+    var status = signOutTime ? "Signed Out" : "Present";
+    
+    var rowData = [date, employeeId, surname, firstName, signInTime, signOutTime, status];
+    sheet.getRange(nextRow, 1, 1, rowData.length).setValues([rowData]);
+    
+    // Add timestamp to track when record was created
+    var timestampCell = sheet.getRange(nextRow, 8);
+    timestampCell.setValue("Created: " + time_now);
+    timestampCell.setNote("Record created on " + date_now + " at " + time_now);
+    
+    SpreadsheetApp.flush();
+    return "Success: Sign-in recorded for " + firstName + " " + surname + " at " + signInTime;
+    
+  } catch (error) {
+    return "Error inserting attendance row: " + error.toString();
+  }
+}
+
+function updateSignOutTime(parsedData, time_now) {
+  try {
+    var sheet = SS.getSheetByName(parsedData.sheet_name);
+    
+    if (!sheet) {
+      return "Error: Sheet not found - " + parsedData.sheet_name;
+    }
+    
+    var employeeId = parsedData.employee_id;
+    var signOutTime = parsedData.sign_out_time || time_now;
+    
+    if (!employeeId) {
+      return "Error: Employee ID not provided";
+    }
+    
+    // Find the employee's row
+    var rowIndex = findEmployeeRow(sheet, employeeId);
+    
+    if (rowIndex === -1) {
+      return "Error: Employee " + employeeId + " not found in today's records";
+    }
+    
+    // Check if already signed out
+    var currentSignOutTime = sheet.getRange(rowIndex, 6).getValue();
+    if (currentSignOutTime && currentSignOutTime !== "") {
+      return "Error: Employee " + employeeId + " has already signed out";
+    }
+    
+    // Update sign-out time and status
+    sheet.getRange(rowIndex, 6).setValue(signOutTime); // Sign-out time
+    sheet.getRange(rowIndex, 7).setValue("Signed Out"); // Status
+    
+    // Update timestamp
+    var timestampCell = sheet.getRange(rowIndex, 8);
+    var currentNote = timestampCell.getNote() || "";
+    timestampCell.setNote(currentNote + "\nSign-out updated: " + time_now);
+    
+    // Get employee name for response
+    var firstName = sheet.getRange(rowIndex, 4).getValue();
+    var surname = sheet.getRange(rowIndex, 3).getValue();
+    
+    SpreadsheetApp.flush();
+    return "Success: Sign-out recorded for " + firstName + " " + surname + " at " + signOutTime;
+    
+  } catch (error) {
+    return "Error updating sign-out time: " + error.toString();
+  }
+}
+
+function getTodayAttendanceData(sheetName) {
+  try {
+    var sheet = SS.getSheetByName(sheetName);
+    
+    if (!sheet) {
+      return JSON.stringify({
+        success: false,
+        message: "Sheet not found: " + sheetName,
+        data: []
+      });
+    }
+    
+    var lastRow = sheet.getLastRow();
+    if (lastRow <= 1) {
+      return JSON.stringify({
+        success: true,
+        message: "No attendance data found",
+        data: []
+      });
+    }
+    
+    // Get all data from sheet
+    var data = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+    var attendanceData = [];
+    
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i];
+      // Format times as HH:mm:ss
+      var signInTime = row[4] ? Utilities.formatDate(new Date(row[4]), "Africa/Lagos", "HH:mm:ss") : "";
+      var signOutTime = row[5] ? Utilities.formatDate(new Date(row[5]), "Africa/Lagos", "HH:mm:ss") : "";
+      
+      attendanceData.push({
+        date: sheetName, // Use sheetName instead of row[0]
+        employee_id: row[1],
+        surname: row[2],
+        first_name: row[3],
+        sign_in_time: signInTime,
+        sign_out_time: signOutTime,
+        status: row[6]
+      });
+    }
+    
+    return JSON.stringify({
+      success: true,
+      message: "Retrieved " + attendanceData.length + " records",
+      data: attendanceData
+    });
+    
+  } catch (error) {
+    return JSON.stringify({
+      success: false,
+      message: "Error retrieving data: " + error.toString(),
+      data: []
+    });
+  }
+}
+
+function checkEmployeeStatus(parsedData) {
+  try {
+    var sheet = SS.getSheetByName(parsedData.sheet_name);
+    var employeeId = parsedData.employee_id;
+    
+    if (!sheet) {
+      return JSON.stringify({
+        success: false,
+        status: "not_found",
+        message: "Sheet not found"
+      });
+    }
+    
+    if (!employeeId) {
+      return JSON.stringify({
+        success: false,
+        status: "error",
+        message: "Employee ID not provided"
+      });
+    }
+    
+    var rowIndex = findEmployeeRow(sheet, employeeId);
+    
+    if (rowIndex === -1) {
+      return JSON.stringify({
+        success: true,
+        status: "not_present",
+        message: "Employee not found in today's records"
+      });
+    }
+    
+    // Get employee status
+    var signOutTime = sheet.getRange(rowIndex, 6).getValue();
+    var status = sheet.getRange(rowIndex, 7).getValue();
+    
+    if (signOutTime && signOutTime !== "") {
+      return JSON.stringify({
+        success: true,
+        status: "signed_out",
+        message: "Employee has already signed out",
+        sign_out_time: Utilities.formatDate(new Date(signOutTime), "Africa/Lagos", "HH:mm:ss")
+      });
+    } else {
+      return JSON.stringify({
+        success: true,
+        status: "present",
+        message: "Employee is currently present"
+      });
+    }
+    
+  } catch (error) {
+    return JSON.stringify({
+      success: false,
+      status: "error",
+      message: "Error checking employee status: " + error.toString()
+    });
+  }
+}
+
+function appendAttendanceRow(parsedData, date_now, time_now) {
+  return insertAttendanceRow(parsedData, date_now, time_now);
+}
+
+function findEmployeeRow(sheet, employeeId) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) {
+    return -1;
+  }
+  
+  var employeeIds = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  
+  for (var i = 0; i < employeeIds.length; i++) {
+    if (employeeIds[i][0].toString() === employeeId.toString()) {
+      return i + 2; // +2 because arrays are 0-indexed and we start from row 2
+    }
+  }
+  
+  return -1;
+}
+
+function getNextAvailableRow(sheet) {
+  return sheet.getLastRow() + 1;
+}
+
+function cleanupOldSheets() {
+  var sheets = SS.getSheets();
+  var currentDate = new Date();
+  var thirtyDaysAgo = new Date(currentDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+  
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var sheetName = sheet.getName();
+    
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(sheetName)) {
+      continue;
+    }
+    
+    try {
+      var sheetDate = new Date(sheetName);
+      if (sheetDate < thirtyDaysAgo) {
+        Logger.log("Old sheet found: " + sheetName);
+        // SS.deleteSheet(sheet);
+      }
+    } catch (error) {
+      Logger.log("Error processing sheet: " + sheetName + " - " + error.toString());
+    }
+  }
+}
+
+function generateAttendanceSummary(startDate, endDate) {
+  try {
+    var summary = {
+      totalDays: 0,
+      totalEmployees: 0,
+      attendanceData: {}
+    };
+    
+    var start = new Date(startDate);
+    var end = new Date(endDate);
+    
+    for (var d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      var dateStr = Utilities.formatDate(d, "Africa/Lagos", "yyyy-MM-dd");
+      var sheet = SS.getSheetByName(dateStr);
+      
+      if (sheet) {
+        summary.totalDays++;
+        var lastRow = sheet.getLastRow();
+        if (lastRow > 1) {
+          var data = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+          
+          for (var i = 0; i < data.length; i++) {
+            var row = data[i];
+            var employeeId = row[1];
+            
+            if (!summary.attendanceData[employeeId]) {
+              summary.attendanceData[employeeId] = {
+                name: row[3] + " " + row[2],
+                daysPresent: 0,
+                daysSignedOut: 0
+              };
+            }
+            
+            summary.attendanceData[employeeId].daysPresent++;
+            if (row[5] && row[5] !== "") {
+              summary.attendanceData[employeeId].daysSignedOut++;
+            }
+          }
+        }
+      }
+    }
+    
+    summary.totalEmployees = Object.keys(summary.attendanceData).length;
+    
+    return JSON.stringify({
+      success: true,
+      summary: summary
+    });
+    
+  } catch (error) {
+    return JSON.stringify({
+      success: false,
+      message: "Error generating summary: " + error.toString()
+    });
+  }
+}
